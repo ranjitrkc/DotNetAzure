@@ -7,7 +7,6 @@ public class CosmosDbService
 
     public CosmosDbService(string connectionString)
     {
-        // Store only — do NOT connect here
         _connectionString = connectionString;
     }
 
@@ -17,7 +16,7 @@ public class CosmosDbService
 
         var settings = MongoClientSettings.FromConnectionString(_connectionString);
         settings.ServerSelectionTimeout = TimeSpan.FromSeconds(10);
-        settings.ConnectTimeout = TimeSpan.FromSeconds(10);
+        settings.ConnectTimeout         = TimeSpan.FromSeconds(10);
 
         var client   = new MongoClient(settings);
         var database = client.GetDatabase("hello-db");
@@ -30,8 +29,23 @@ public class CosmosDbService
         await GetCollection().InsertOneAsync(order);
     }
 
+    // ── NEW ── idempotency check
+    public async Task<bool> OrderExistsAsync(string orderId)
+    {
+        var count = await GetCollection()
+            .CountDocumentsAsync(o => o.OrderId == orderId);
+        return count > 0;
+    }
+
     public async Task<List<OrderEvent>> GetAllOrdersAsync()
     {
         return await GetCollection().Find(_ => true).ToListAsync();
+    }
+
+    public async Task<OrderEvent?> GetOrderByIdAsync(string orderId)
+    {
+        return await GetCollection()
+            .Find(o => o.OrderId == orderId)
+            .FirstOrDefaultAsync();
     }
 }

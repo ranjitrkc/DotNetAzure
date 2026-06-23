@@ -2,7 +2,6 @@ using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using Microsoft.ApplicationInsights;
 using Microsoft.Azure.Functions.Worker;
-using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Azure.Functions.Worker.SignalRService;
 using Microsoft.Extensions.Logging;
 
@@ -14,9 +13,9 @@ public class FunctionB
     private readonly ILogger<FunctionB> _log;
 
     public FunctionB(
-        CosmosDbService cosmos,
+        CosmosDbService    cosmos,
         BlobStorageService blob,
-        TelemetryClient telemetry,
+        TelemetryClient    telemetry,
         ILogger<FunctionB> log)
     {
         _cosmos    = cosmos;
@@ -45,10 +44,36 @@ public class FunctionB
                 new JsonSerializerOptions
                 {
                     PropertyNameCaseInsensitive = true
-                });
+                }) ?? throw new Exception("Failed to deserialize order");
 
-            if (order == null)
-                throw new Exception("Failed to deserialize order");
+            // ── IDEMPOTENCY CHECK ──────────────────────────────────
+            var isDuplicate = await _cosmos.OrderExistsAsync(order.OrderId);
+            if (isDuplicate)
+            {
+                _log.LogWarning(
+                    "Duplicate message — orderId {Id} already processed. Skipping.",
+                    order.OrderId);
+
+                _telemetry.TrackEvent("OrderDuplicate",
+                    new Dictionary<string, string>
+                    {
+                        { "OrderId",       order.OrderId      },
+                        { "MessageId",     message.MessageId  },
+                        { "DeliveryCount", message.DeliveryCount.ToString() }
+                    });
+
+                // Complete the duplicate — don't throw, don't retry
+                await actions.CompleteMessageAsync(message);
+
+                return new SignalRMessageAction("orderDuplicate")
+                {
+                    Arguments = new object[]
+                    {
+                        new { order.OrderId, Message = "Duplicate — already processed" }
+                    }
+                };
+            }
+            // ── END IDEMPOTENCY CHECK ──────────────────────────────
 
             // Phase 5 — Cosmos DB
             await _cosmos.InsertOrderAsync(order);
@@ -62,16 +87,15 @@ public class FunctionB
             _telemetry.TrackEvent("OrderProcessed",
                 new Dictionary<string, string>
                 {
-                    { "OrderId", order.OrderId },
-                    { "Name",    order.Name    },
+                    { "OrderId", order.OrderId           },
+                    { "Name",    order.Name              },
                     { "Amount",  order.Amount.ToString() }
                 });
-            _log.LogInformation("App Insights event tracked — {Id}", order.OrderId);
 
             await actions.CompleteMessageAsync(message);
             _log.LogInformation("Order {Id} completed", order.OrderId);
 
-            // Phase 7b — SignalR push to browser
+            // Phase 7b — SignalR push
             return new SignalRMessageAction("orderProcessed")
             {
                 Arguments = new object[]
@@ -91,7 +115,7 @@ public class FunctionB
         {
             _log.LogError(ex, "Failed processing message {Id}",
                 message.MessageId);
-            throw;
+            throw; // runtime abandons → retry → eventually DLQ
         }
     }
 }
