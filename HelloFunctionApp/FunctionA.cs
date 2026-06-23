@@ -11,10 +11,12 @@ public class FunctionA
 {
     private readonly KeyVaultService _kv;
     private readonly ILogger<FunctionA> _log;
+    private readonly KafkaProducerService _kafka;
 
-    public FunctionA(KeyVaultService kv, ILogger<FunctionA> log)
+    public FunctionA(KeyVaultService kv, KafkaProducerService kafka, ILogger<FunctionA> log)
     {
         _kv  = kv;
+        _kafka = kafka;
         _log = log;
     }
 
@@ -57,8 +59,13 @@ public class FunctionA
             ProcessedAt = DateTime.UtcNow.ToString("o")
         };
 
-        await SendToServiceBusAsync(sbConn, order);
-        _log.LogInformation("Order {Id} sent to Service Bus", order.OrderId);
+        // Inside Run() — replace the SendToServiceBusAsync call with:
+        await Task.WhenAll(
+            SendToServiceBusAsync(sbConn, order),
+            _kafka.PublishOrderAsync(order)
+        );
+
+        _log.LogInformation("Order {Id} published to Service Bus + Kafka", order.OrderId);
 
         // 5. Return response
         var response = req.CreateResponse(HttpStatusCode.OK);
